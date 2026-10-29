@@ -8,8 +8,24 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
   exit $LASTEXITCODE
 }
 $root = $PSScriptRoot; $buildDir = Join-Path $root '.pio\build'
+Set-Location -LiteralPath $root
+if (-not (Test-Path -LiteralPath (Join-Path $root 'platformio.ini') -PathType Leaf)) {
+  throw "No platformio.ini found in '$root'. Put this script in the root of a PlatformIO project and try again. This directory probably cannot be built with this script."
+}
+# PlatformIO may be installed in a project venv, on PATH, or as a Python module.
+$pioExe = $null; $pioPrefix = @()
+$candidates = @((Join-Path $root '.venv\Scripts\pio.exe'), (Join-Path $env:USERPROFILE '.platformio\penv\Scripts\pio.exe'))
+foreach ($candidate in $candidates) { if (Test-Path -LiteralPath $candidate -PathType Leaf) { $pioExe = $candidate; break } }
+if (-not $pioExe) { $cmd = Get-Command pio -ErrorAction SilentlyContinue; if ($cmd) { $pioExe = $cmd.Source } }
+if (-not $pioExe) {
+  $py = Get-Command py -ErrorAction SilentlyContinue
+  if ($py) { & $py.Source -m platformio --version 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { $pioExe = $py.Source; $pioPrefix = @('-m', 'platformio') } }
+}
+if (-not $pioExe) {
+  throw "PlatformIO Core was not found. This directory contains platformio.ini, but the build tool is missing. Install PlatformIO Core: https://docs.platformio.org/en/latest/core/installation/index.html ; then restart the terminal and try again. Python can install it with: py -m pip install -U platformio"
+}
 function Get-Envs {
-  $raw = & py -m platformio project config --json-output
+  $raw = & $pioExe @pioPrefix project config --json-output
   if ($LASTEXITCODE) { throw 'PlatformIO configuration lookup failed.' }
   $result = @()
   foreach ($item in ($raw | ConvertFrom-Json)) {
@@ -41,5 +57,5 @@ $build=Add-Button 'Build Selected' {$form.DialogResult='OK';$form.Close()}; $bui
 $cancel=Add-Button 'Cancel' {$form.DialogResult='Cancel';$form.Close()}; $form.AcceptButton=$build;$form.CancelButton=$cancel
 if($form.ShowDialog() -ne 'OK'){Write-Host 'Cancelled.' -ForegroundColor Yellow;exit 0}
 $selected=@($boxes.Values|Where-Object Checked|ForEach-Object Tag);if(!$selected.Count){Write-Host 'No firmwares selected.' -ForegroundColor Yellow;exit 0}
-$failed=@(); foreach($family in 'ESP32','nRF52') { $batch=@($selected|Where-Object Family -eq $family);if(!$batch.Count){continue};Write-Host '';Write-Host "=== Building $family batch ($($batch.Count)) ===" -ForegroundColor Cyan;$args=@('-m','platformio','run');foreach($env in $batch){$args+=@('-e',$env.Name)};if($family -eq 'nRF52'){$args+=@('-t','create_uf2')};& py @args;if($LASTEXITCODE){$failed+=$batch.Name;Write-Host "[FAILED] $family batch" -ForegroundColor Red;continue};foreach($env in $batch){foreach($ext in 'bin','uf2'){$src=Join-Path (Join-Path $buildDir $env.Name) "firmware.$ext";if(Test-Path $src){Copy-Item $src (Join-Path $root "$($env.Name).$ext") -Force;Write-Host "Copied: $($env.Name).$ext" -ForegroundColor Green}}} }
+$failed=@(); foreach($family in 'ESP32','nRF52') { $batch=@($selected|Where-Object Family -eq $family);if(!$batch.Count){continue};Write-Host '';Write-Host "=== Building $family batch ($($batch.Count)) ===" -ForegroundColor Cyan;$buildArgs=@('run');foreach($env in $batch){$buildArgs+=@('-e',$env.Name)};if($family -eq 'nRF52'){$buildArgs+=@('-t','create_uf2')};& $pioExe @pioPrefix @buildArgs;if($LASTEXITCODE){$failed+=$batch.Name;Write-Host "[FAILED] $family batch" -ForegroundColor Red;continue};foreach($env in $batch){foreach($ext in 'bin','uf2'){$src=Join-Path (Join-Path $buildDir $env.Name) "firmware.$ext";if(Test-Path $src){Copy-Item $src (Join-Path $root "$($env.Name).$ext") -Force;Write-Host "Copied: $($env.Name).$ext" -ForegroundColor Green}}} }
 Write-Host '';Write-Host '=== Done ===' -ForegroundColor Cyan;if($failed.Count){Write-Host "Failed: $($failed -join ', ')" -ForegroundColor Red;exit 1}
